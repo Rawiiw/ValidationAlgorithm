@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime
 
 ee.Authenticate()
-ee.Initialize(project='ee-kosinova')
+ee.Initialize(project='ee-myproject')
 
 
 def load_data_from_excel(excel_file):

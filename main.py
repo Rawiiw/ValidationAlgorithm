@@ -1,177 +1,103 @@
-from tkinter import Tk, filedialog
 import ee
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-from datetime import datetime
+
+import plot_data
+from aqua_data import process_aqua_data
+from excel_manager import ExcelManager
+from landsat_data import process_landsat_data
+from rsme_mbe import calculate_rmse_mbe
 
 ee.Authenticate()
-ee.Initialize(project='ee-myproject')
+ee.Initialize(project='ee-kosinova')
 
-
-def load_data_from_excel(excel_file):
-    df = pd.read_excel(excel_file, names=['Date', 'Time', 'Temperature'])
-    df['DateTime'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Time'].astype(str))
-    return df[['DateTime', 'Temperature']]
-
-def get_temperature_data(coordinates, start_date, end_date, start_time, end_time, satellite, max_distance=10000):
+def validate_coordinates(coords):
     try:
-        start_datetime = ee.Date(datetime.strptime(start_date + ' ' + start_time, '%d.%m.%Y %H:%M').isoformat())
-        end_datetime = ee.Date(datetime.strptime(end_date + ' ' + end_time, '%d.%m.%Y %H:%M').isoformat())
-
-        if satellite.lower() == 'landsat':
-            collection = ee.ImageCollection('LANDSAT/LC08/C01/T1_TOA')
-            temperature_band = 'B10'
-        elif satellite.lower() == 'aqua':
-            collection = ee.ImageCollection('MODIS/006/MOD11A1')
-            temperature_band = 'LST_Day_1km'
+        if len(coords) != 2:
+            return False
+        latitude = float(coords[0])
+        longitude = float(coords[1])
+        if -90 <= latitude <= 90 and -180 <= longitude <= 180:
+            return True
         else:
-            raise ValueError('Invalid satellite selection. Please choose "Landsat" or "Aqua".')
+            return False
+    except ValueError:
+        return False
 
-        latitude, longitude = map(float, coordinates.split(','))
-        point = ee.Geometry.Point(longitude, latitude)
-
-        # Фильтрация коллекции по времени и расстоянию от заданной точки
-        filtered_collection = collection.filterDate(start_datetime, end_datetime) \
-            .filterBounds(point) \
-            .filter(ee.Filter.lt('system:time_start', end_datetime.millis())) \
-            .filter(ee.Filter.gt('system:time_start', start_datetime.millis())) \
-            .filter(ee.Filter.lt('CLOUD_COVER', 5))
-
-        image = ee.Image(filtered_collection.first())
-
-        temperature_data = image.reduceRegion(reducer=ee.Reducer.mean(),
-                                              geometry=point,
-                                              scale=1000)
-
-        print("Temperature data object:")
-        print(temperature_data.getInfo())
-
-        temperature_gee = temperature_data.get(temperature_band)
-        print("Temperature GEE object:")
-        print(temperature_gee.getInfo())
-
-        # Получение времени съемки изображения из метаданных
-        system_time_start = image.get('system:time_start').getInfo()
-        print("System time start:")
-        print(system_time_start)
-
-        return temperature_gee.getInfo() - 273.15, system_time_start  # Перевод из K в C
-
-    except Exception as e:
-        print("An error occurred in get_temperature_data:", e)
-        return None, None
-
-
-
-def compute_rmse_mbe(observed, predicted):
-    rmse = np.sqrt(np.mean((observed - predicted) ** 2))
-    mbe = np.mean(observed - predicted)
-    return rmse, mbe
-
-
-def plot_temperature_comparison(ground_data, temperature_value, search_time, system_time_start):
-    plt.plot(ground_data['DateTime'], ground_data['Temperature'], label='Наземные данные')
-    plt.axhline(y=temperature_value, color='r', linestyle='--', label='GEE данные')
-    plt.axvline(x=pd.to_datetime(system_time_start / 1000, unit='s', utc=True), color='g', linestyle='--',
-                label='Время съемки')
-    plt.xlabel('Дата и время')
-    plt.ylabel('Температура (°C)')
-    plt.title('Сравнение наземных и GEE данных о температуре')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-
-def select_excel_file():
-    root = Tk()
-    root.withdraw()
-    file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx;*.xls")])
-    return file_path
-
-
-def get_coordinates_from_map():
-    # New coordinates: Moscow
-    return '55.7558, 37.6176'
-
+def input_coordinates():
+    while True:
+        coordinates_str = input("Enter coordinates (latitude, longitude)").strip()
+        if not coordinates_str:
+            return '62.241918, 67.926724'
+        coordinates = coordinates_str.split(',')
+        if validate_coordinates(coordinates):
+            return coordinates
+        else:
+            print("Incorrect coordinates. Please enter correct values.")
 
 def main():
-    try:
-        coordinates = get_coordinates_from_map()
-        print(f'Координаты: {coordinates}')
+    excel_manager = ExcelManager()
+    # Choose the Excel file
+    excel_manager.select_excel_file()
+    # Read the data from the Excel file
+    if excel_manager.read_excel():
+        # Use date_start and date_end from ExcelManager for processing data from Earth Engine
+        date_start = excel_manager.date_start
+        date_end = excel_manager.date_end
 
-        start_date = input('Введите дату начала (дд.мм.гггг): ')
-        if not start_date:
-            start_date = '01.01.2021'
+        coordinates = input_coordinates()
+        x = float(coordinates[0])
+        y = float(coordinates[1])
 
-        end_date = input('Введите дату окончания (дд.мм.гггг): ')
-        if not end_date:
-            end_date = '31.12.2021'
+        # Parameters definition
+        scale = 11132
 
-        start_time = input('Введите время начала (чч:мм): ')
-        if not start_time:
-            start_time = '00:00'
+        location_point = ee.Geometry.Point(x, y)
 
-        end_time = input('Введите время окончания (чч:мм): ')
-        if not end_time:
-            end_time = '23:59'
+        # Choose the satellite
+        satellite_choice = input("Choose satellite (Aqua or Landsat) [Default: aqua/landsat]: ").lower() or 'aqua'
 
-        satellite = input('Выберите спутник (Landsat или Aqua): ')
-        if not satellite:
-            satellite = 'Landsat'
-
-        print("User inputs collected.")
-
-        excel_file = select_excel_file()
-        ground_data = load_data_from_excel(excel_file)
-        print("Ground data loaded.")
-
-        temperature_gee, system_time_start = get_temperature_data(coordinates, start_date, end_date, start_time,
-                                                                   end_time, satellite)
-        print("Temperature GEE object:", temperature_gee)
-
-        if temperature_gee is not None:
-            if satellite.lower() == 'aqua':
-                temperature_value = temperature_gee
-            elif satellite.lower() == 'landsat':
-                temperature_band = 'B10' if temperature_gee is not None else 'B11'
-                temperature_value = temperature_gee
-            else:
-                raise ValueError('Invalid satellite selection. Please choose "Landsat" or "Aqua".')
-
-            if temperature_value is not None:
-                print(f'Температура (GEE): {temperature_value} °C')
-            else:
-                print('Ошибка: Данные о температуре отсутствуют в объекте temperature_gee.')
-
-            search_time = None
-            if isinstance(temperature_gee, dict) and 'properties' in temperature_gee:
-                if system_time_start:
-                    search_time = pd.to_datetime(system_time_start, unit='ms', utc=True).strftime('%d.%m.%Y %H:%M')
-                else:
-                    print('Ошибка: Время съемки не найдено в метаданных.')
-            else:
-                print('Ошибка: Метаданные о температуре отсутствуют или имеют неверный формат.')
-
-            if search_time:
-                idx = ground_data.index[ground_data['DateTime'] == search_time].tolist()
-                if idx:
-                    idx = idx[0]
-                    ground_temperature = ground_data.iloc[idx]['Temperature']
-                    rmse, mbe = compute_rmse_mbe(temperature_value, ground_temperature)
-                    print(f'RMSE: {rmse}')
-                    print(f'MBE: {mbe}')
-
-                    plot_temperature_comparison(ground_data, temperature_value, search_time, system_time_start)
-                else:
-                    print('Ошибка: Время поиска не найдено в данных наземных измерений.')
-            else:
-                print('Ошибка: Время поиска не определено.')
+        # Process data depending on the selected satellite
+        if satellite_choice == "aqua":
+            data = process_aqua_data(location_point, scale, date_start, date_end)
+        elif satellite_choice == "landsat":
+            data = process_landsat_data(location_point, scale, date_start, date_end)
         else:
-            print('Ошибка: Объект temperature_gee равен None.')
+            print("Invalid satellite choice. Please choose Aqua or Landsat.")
+            return
 
-    except Exception as e:
-        print("An error occurred:", e)
+        # Print the data
+        plot_data.plot_data(data, satellite_choice)
+
+        # Load data from the Excel file
+        excel_data = excel_manager.data.set_index('datetime')['value']
+
+        # Choose only dates that match in both datasets
+        common_dates = excel_data.index.intersection(data.index)
+
+        print("Dates in satellite data:", data.index.strftime('%Y-%m-%d %H:%M:%S'))
+        print("Dates in Excel data:", excel_data.index.strftime('%Y-%m-%d %H:%M:%S'))
+
+        print("Common dates:", common_dates)
+
+        if len(common_dates) == 0:
+            print("No common dates found between satellite and Excel data.")
+            return
+
+        satellite_data = data.loc[common_dates]
+        excel_data = excel_data.loc[common_dates]
+
+        # Calculate RMSE and MBE
+        rmse, mbe = calculate_rmse_mbe(satellite_data, excel_data)
+        print("RMSE:", rmse)
+        print("MBE:", mbe)
+        print("Number of missing values in satellite data:", satellite_data.isnull().sum())
+        print("Number of missing values in Excel data:", excel_data.isnull().sum())
+        print("First date in satellite data:", satellite_data.index[0])
+        print("Last date in satellite data:", satellite_data.index[-1])
+        print("First date in Excel data:", excel_data.index[0])
+        print("Last date in Excel data:", excel_data.index[-1])
+
+    else:
+        print("Failed to read Excel file.")
 
 
 if __name__ == "__main__":
